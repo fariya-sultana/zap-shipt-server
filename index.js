@@ -13,7 +13,7 @@ app.use(express.json());
 
 
 
-const { MongoClient, ServerApiVersion } = require('mongodb');
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.ry0n7jv.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
@@ -38,6 +38,22 @@ async function run() {
             res.send(parcels);
         });
 
+        app.get('/parcels', async (req, res) => {
+            try {
+                const userEmail = req.query.email;
+                const query = userEmail ? { created_by: userEmail } : {};
+                const options = {
+                    sort: { createdAt: -1 },
+                }
+
+                const parcels = await parcelCollection.find(query, options).toArray();
+                res.send(parcels);
+            } catch (error) {
+                console.error('Error fetching parcels:', error);
+                res.status(500).send({ message: 'Failed to get parcels' })
+            }
+        })
+
         app.post("/parcels", async (req, res) => {
             try {
                 const newParcel = req.body;
@@ -49,6 +65,25 @@ async function run() {
                 res.status(500).send({ message: "Failed to insert parcel" });
             }
         });
+
+
+        app.delete('/parcels/:id', async (req, res) => {
+            const { id } = req.params;
+
+            try {
+                const result = await parcelCollection.deleteOne({ _id: new ObjectId(id) });
+
+                if (result.deletedCount === 0) {
+                    return res.status(404).send({ message: 'Parcel not found or already deleted' });
+                }
+
+                res.send(result);
+            } catch (error) {
+                console.error('Delete error:', error);
+                res.status(500).send({ message: 'Failed to delete parcel' });
+            }
+        });
+
 
         // Send a ping to confirm a successful connection
         await client.db("admin").command({ ping: 1 });
