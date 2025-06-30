@@ -32,6 +32,7 @@ async function run() {
 
         const db = client.db("parcelDB");
         const parcelCollection = db.collection("parcels");
+        
 
         const paymentsCollection = db.collection("payments");
 
@@ -102,21 +103,21 @@ async function run() {
             }
         });
 
-        app.get('/payments', async(req, res)=> {
-            try{
+        app.get('/payments', async (req, res) => {
+            try {
                 const userEmail = req.query.email;
 
-                const query = userEmail ? {email: userEmail} : {};
+                const query = userEmail ? { email: userEmail } : {};
 
-                const options = {sort: {paid_At: -1}};
+                const options = { sort: { paid_At: -1 } };
 
                 const payments = await paymentsCollection.find(query, options).toArray();
                 res.send(payments);
-            }catch(error){
+            } catch (error) {
                 console.error('Error fetching payment history:', error),
-                res.status(500).send({message: 'Failed to get payments'})
+                    res.status(500).send({ message: 'Failed to get payments' })
             }
-        } )
+        })
 
         app.post('/payments', async (req, res) => {
             try {
@@ -156,6 +157,7 @@ async function run() {
             }
         })
 
+       
 
         app.delete('/parcels/:id', async (req, res) => {
             const { id } = req.params;
