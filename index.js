@@ -65,6 +65,16 @@ async function run() {
             }
         }
 
+        const verifyAdmin = async (req, res, next) => {
+            const email = req.decoded.email;
+            const query = { email }
+            const user = await usersCollection.findOne(query);
+            if (!user || user.role !== 'admin') {
+                return res.status(403).send({ message: 'forbidden access' })
+            }
+            next();
+        }
+
         // GET /users/search?email=someone@example.com
         app.get("/users/search", async (req, res) => {
             const email = req.query.email;
@@ -82,7 +92,7 @@ async function run() {
             }
         });
 
-        app.patch("/users/:id/role", async (req, res) => {
+        app.patch("/users/:id/role", verifyFBToken, verifyAdmin, async (req, res) => {
             const { id } = req.params;
             const { role } = req.body;
             if (!['admin', 'user'].includes(role)) {
@@ -143,14 +153,32 @@ async function run() {
 
         app.get('/parcels', verifyFBToken, async (req, res) => {
             try {
-                const userEmail = req.query.email;
-                const query = userEmail ? { created_by: userEmail } : {};
+                const { email,
+                    payment_status, delivery_status
+                } = req.query;
+
+                let query = {}
+                if (email) {
+                    query = { created_by: email }
+                }
+
+                if (
+                    payment_status) {
+                    query.payment_status = payment_status
+                }
+
+                if (
+                    delivery_status) {
+                    query.delivery_status = delivery_status
+                }
+
                 const options = {
                     sort: { createdAt: -1 },
                 }
 
                 const parcels = await parcelCollection.find(query, options).toArray();
                 res.send(parcels);
+
             } catch (error) {
                 console.error('Error fetching parcels:', error);
                 res.status(500).send({ message: 'Failed to get parcels' })
@@ -268,7 +296,7 @@ async function run() {
             res.send(result);
         })
 
-        app.get("/riders/pending", async (req, res) => {
+        app.get("/riders/pending", verifyFBToken, verifyAdmin, async (req, res) => {
             try {
                 const pendingRiders = await ridersCollection
                     .find({ status: "pending" })
@@ -324,7 +352,7 @@ async function run() {
         });
 
         // Get all active riders
-        app.get("/riders/active", async (req, res) => {
+        app.get("/riders/active", verifyFBToken, verifyAdmin, async (req, res) => {
             const riders = await ridersCollection.find({ status: "approved" }).toArray();
             res.send(riders);
         });
@@ -337,6 +365,65 @@ async function run() {
                 { $set: { status: "deactivated" } }
             );
             res.send(result);
+        });
+
+        app.patch("/parcels/:id/assign-rider", async (req, res) => {
+            const { id } = req.params;
+            const { riderId } = req.body;
+
+            if (!riderId) return res.status(400).send({ message: "Rider ID required" });
+
+            try {
+                // Update parcel: assign rider and set delivery status
+                const parcelUpdateResult = await parcelCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    {
+                        $set: {
+                            assignedRider: new ObjectId(riderId),
+                            delivery_status: "in-transit",
+                        },
+                    }
+                );
+
+                // Add work_status to rider if not exists
+                const riderUpdateResult = await ridersCollection.updateOne(
+                    { _id: new ObjectId(riderId) },
+                    {
+                        $set: {
+                            work_status: "in-delivery",
+                        },
+                    }
+                );
+
+                res.send({
+                    message: "Rider assigned and statuses updated",
+                    parcelUpdateResult,
+                    riderUpdateResult,
+                });
+            } catch (error) {
+                console.error("Assignment error:", error);
+                res.status(500).send({ message: "Failed to assign rider and update statuses" });
+            }
+        });
+
+
+
+        // GET: /riders/active?district=Narsingdi
+        app.get("/riders/available", async (req, res) => {
+            const district = req.query.district;
+
+            try {
+                const filter = { status: "approved" };
+                if (district) {
+                    filter.district = district;
+                }
+
+                const riders = await ridersCollection.find(filter).toArray();
+                res.send(riders);
+            } catch (error) {
+                console.error("Failed to fetch active riders", error);
+                res.status(500).send({ message: "Error fetching riders" });
+            }
         });
 
 
