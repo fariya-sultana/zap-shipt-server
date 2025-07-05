@@ -3,6 +3,7 @@ dotenv.config();
 
 const express = require("express");
 const cors = require("cors");
+const admin = require("firebase-admin");
 const stripe = require('stripe')(process.env.PAYMENT_GATEWAY_KEY);
 
 
@@ -11,6 +12,13 @@ const PORT = process.env.PORT || 5000;
 
 app.use(cors());
 app.use(express.json());
+
+
+const serviceAccount = require("./zip-shift-firebase-adminsdk.json");
+
+admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+});
 
 
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
@@ -31,17 +39,109 @@ async function run() {
         await client.connect();
 
         const db = client.db("parcelDB");
+        const usersCollection = db.collection('users');
         const parcelCollection = db.collection("parcels");
-        
-
         const paymentsCollection = db.collection("payments");
+        const ridersCollection = db.collection('riders');
+
+        // custom middleware
+        const verifyFBToken = async (req, res, next) => {
+            const authHeader = req.headers.authorization;
+            if (!authHeader) {
+                return res.status(401).send({ message: 'unauthorized access' })
+            }
+            const token = authHeader.split(' ')[1];
+            if (!token) {
+                return res.status(401).send({ message: 'unauthorized access' })
+            }
+
+            try {
+                const decoded = await admin.auth().verifyIdToken(token);
+                req.decoded = decoded;
+                next();
+            }
+            catch (error) {
+                return res.status(403).send({ message: 'forbidden access' })
+            }
+        }
+
+        // GET /users/search?email=someone@example.com
+        app.get("/users/search", async (req, res) => {
+            const email = req.query.email;
+            if (!email) return res.status(400).send({ error: "Email is required" });
+
+            const regex = new RegExp(email, "i");
+
+            try {
+                const user = await usersCollection.find({ email: { $regex: regex } }).limit(10).toArray();
+
+                res.send(user);
+            } catch (error) {
+                console.error('Error searching users', error);
+                res.status(500).send({ error: "User not found" });
+            }
+        });
+
+        app.patch("/users/:id/role", async (req, res) => {
+            const { id } = req.params;
+            const { role } = req.body;
+            if (!['admin', 'user'].includes(role)) {
+                return res.status(400).send({ message: 'Invalid role' });
+            }
+
+            try {
+                const result = await usersCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    { $set: { role } }
+                );
+                res.send({ message: `User role updated to ${role}`, result });
+            } catch (error) {
+                console.error('Error updating user role', error);
+                res.status(500).send({ message: 'Failed to update user role' });
+            }
+
+        });
+
+
+        app.get('/users/:email/role', async (req, res) => {
+            try {
+                const email = req.params.email;
+
+                if (!email) {
+                    return res.status(400).send({ message: 'Email is required' });
+                }
+
+                const user = await usersCollection.findOne({ email });
+
+                if (!user) {
+                    return res.status(404).send({ message: 'User not found' });
+                }
+
+                res.send({ role: user.role || 'user' });
+            } catch (error) {
+                console.error('Error getting user role:', error);
+                res.status(500).send({ message: 'Failed to get role' });
+            }
+        })
+
+        app.post('/users', async (req, res) => {
+            const email = req.body.email;
+            const userExists = await usersCollection.findOne({ email });
+            if (userExists) {
+                return res.status(200).send({ message: 'User already exists', inserted: false })
+            }
+            const user = req.body;
+            const result = await usersCollection.insertOne(user);
+            res.send(result);
+        })
+
 
         app.get("/parcels", async (req, res) => {
             const parcels = await parcelCollection.find({}).toArray();
             res.send(parcels);
         });
 
-        app.get('/parcels', async (req, res) => {
+        app.get('/parcels', verifyFBToken, async (req, res) => {
             try {
                 const userEmail = req.query.email;
                 const query = userEmail ? { created_by: userEmail } : {};
@@ -103,9 +203,14 @@ async function run() {
             }
         });
 
-        app.get('/payments', async (req, res) => {
+        app.get('/payments', verifyFBToken, async (req, res) => {
             try {
                 const userEmail = req.query.email;
+
+                if (req.decoded.email !== userEmail) {
+                    return res.status(403).send({ message: 'forbidden access' })
+                }
+
 
                 const query = userEmail ? { email: userEmail } : {};
 
@@ -157,7 +262,84 @@ async function run() {
             }
         })
 
-       
+        app.post('/riders', async (req, res) => {
+            const rider = req.body;
+            const result = await ridersCollection.insertOne(rider);
+            res.send(result);
+        })
+
+        app.get("/riders/pending", async (req, res) => {
+            try {
+                const pendingRiders = await ridersCollection
+                    .find({ status: "pending" })
+                    .sort({ submittedAt: -1 }) // Optional: sort by latest
+                    .toArray();
+
+                res.send(pendingRiders);
+            } catch (error) {
+                console.error("Error fetching pending riders:", error);
+                res.status(500).send({ message: "Failed to fetch pending riders" });
+            }
+        });
+
+
+        // Approve rider
+        app.patch('/riders/approve/:id', async (req, res) => {
+            const { id } = req.params;
+            const { email } = req.body;
+            try {
+                const result = await ridersCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    { $set: { status: "approved" } }
+                );
+
+                if (result.modifiedCount > 0) {
+                    const userQuery = { email };
+                    const userUpdatedDoc = {
+                        $set: {
+                            role: 'rider'
+                        }
+                    };
+                    const roleResult = await usersCollection.updateOne(userQuery, userUpdatedDoc)
+                    console.log(roleResult.modifiedCount)
+                }
+                res.send(result);
+            } catch (error) {
+                res.status(500).send({ message: "Failed to approve rider", error });
+            }
+        });
+
+        // Reject rider
+        app.patch('/riders/reject/:id', async (req, res) => {
+            const { id } = req.params;
+            try {
+                const result = await ridersCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    { $set: { status: "rejected" } }
+                );
+                res.send(result);
+            } catch (error) {
+                res.status(500).send({ message: "Failed to reject rider", error });
+            }
+        });
+
+        // Get all active riders
+        app.get("/riders/active", async (req, res) => {
+            const riders = await ridersCollection.find({ status: "approved" }).toArray();
+            res.send(riders);
+        });
+
+        // Deactivate a rider
+        app.patch("/riders/deactivate/:id", async (req, res) => {
+            const id = req.params.id;
+            const result = await ridersCollection.updateOne(
+                { _id: new ObjectId(id) },
+                { $set: { status: "deactivated" } }
+            );
+            res.send(result);
+        });
+
+
 
         app.delete('/parcels/:id', async (req, res) => {
             const { id } = req.params;
